@@ -9,5 +9,6 @@ setup(
     license='MIT',
     author='Ziyang Hu',
     author_email='hu.ziyang@cantab.net',
-    description='TBA'
+    description='TBA',
+    tests_require=['pytest']
 )
