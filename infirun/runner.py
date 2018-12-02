@@ -124,14 +124,26 @@ class PipelineSink:
 def pprint(serialized, level=0, prefix='root', outfile=None):
     s_type = serialized['type']
 
+    if s_type == 'placeholder':
+        print(f'{"  " * level} {prefix} [P]: {serialized["idx"]}')
+        return
+
     if s_type not in ['fun_invoke', 'obj_invoke']:
         return
 
+    runner_str = " [R]" if serialized["runner"]["has_runner"] else ""
+    prefix_str = f'{"  " * level} {prefix}{runner_str}: '
+
     if s_type == 'obj_invoke':
-        print(f'{"  " * level} {prefix}: {serialized["inst"]["cls"]["module"]}:{serialized["inst"]["cls"]["name"]}(...).{serialized["method"] or "__call__"}{" [I]" if serialized["inst"]["cls"]["iter_output"] else ""}')
+        print(prefix_str +
+              f'{serialized["inst"]["cls"]["module"]}:'
+              f'{serialized["inst"]["cls"]["name"]}().{serialized["method"] or "__call__"}'
+              f'{" [I]" if serialized["inst"]["cls"]["iter_output"] else ""}')
 
     if s_type == 'fun_invoke':
-        print(f'{"  " * level} {prefix}: {serialized["fun"]["module"]}:{serialized["fun"]["name"]}{" [I]" if serialized["fun"]["iter_output"] else ""}')
+        print(prefix_str +
+              f'{serialized["fun"]["module"]}:{serialized["fun"]["name"]}'
+              f'{" [I]" if serialized["fun"]["iter_output"] else ""}')
 
     for i, v in enumerate(serialized['args']):
         pprint(v, level + 1, prefix=str(i), outfile=outfile)
@@ -140,8 +152,31 @@ def pprint(serialized, level=0, prefix='root', outfile=None):
         pprint(v, level + 1, prefix=k, outfile=outfile)
 
 
-def runner_chopper(serialized, chop_collector=None, idx=0):
-    if chop_collector is None:
-        chop_collector = {}
+def should_chop(serialized):
+    return serialized['type'] in ['fun_invoke', 'obj_invoke'] and serialized['runner']['has_runner']
 
-    return
+
+def chop_serialized(serialized, n, collected):
+    # ret = {k: v for k, v in serialized.items()}
+    ret = serialized
+    current = n
+
+    for i in range(len(ret['args'])):
+        arg = ret['args'][i]
+        current, chopped = chop_serialized(arg, current, collected)
+        if should_chop(arg):
+            current += 1
+            ret['args'][i] = {'type': 'placeholder',
+                              'idx': current}
+            collected[current] = chopped
+
+    for k in ret['kwargs']:
+        arg = ret['kwargs'][k]
+        current, chopped = chop_serialized(arg, current, collected)
+        if should_chop(arg):
+            current += 1
+            ret['kwargs'][k] = {'type': 'placeholder',
+                                'idx': current}
+            collected[current] = chopped
+
+    return current, ret

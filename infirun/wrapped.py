@@ -40,3 +40,10 @@ def ensure_wrapped(obj):
         return obj
     else:
         return Constant(obj)
+
+
+def ensure_constant(obj):
+    if isinstance(obj, Constant):
+        return obj
+    else:
+        return Constant(obj)
