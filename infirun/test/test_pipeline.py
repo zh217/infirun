@@ -10,9 +10,9 @@ def my_randn():
 def test_pipeline_no_args():
     invocation = my_randn()
     serialized = invocation.serialize()
-    assert serialized['type'] == 'func_invoke'
-    assert serialized['func']['type'] == 'func'
-    assert not serialized['func']['flatten_output']
+    assert serialized['type'] == 'fun_invoke'
+    assert serialized['fun']['type'] == 'fun'
+    assert not serialized['fun']['iter_output']
     assert my_randn.raw() == 42
     invocation.start()
     assert next(invocation) == 42
@@ -22,17 +22,17 @@ def test_pipeline_no_args():
     assert next(restored) == 42
 
 
-@pipeline(flatten_output=True)
+@pipeline(iter_output=True)
 def totally_random():
     return list(range(3))
 
 
-def test_pipeline_flatten_output():
+def test_pipeline_iter_output():
     invocation = totally_random()
     serialized = invocation.serialize()
-    assert serialized['type'] == 'func_invoke'
-    assert serialized['func']['type'] == 'func'
-    assert serialized['func']['flatten_output']
+    assert serialized['type'] == 'fun_invoke'
+    assert serialized['fun']['type'] == 'fun'
+    assert serialized['fun']['iter_output']
     assert totally_random.raw() == list(range(3))
     invocation.start()
     assert next(invocation) == 0
@@ -48,7 +48,33 @@ def test_pipeline_flatten_output():
     assert next(restored) == 1
 
 
-@pipeline(flatten_output=True, n_epochs=1)
+@pipeline(iter_output=True)
+def totally_random_2():
+    for i in range(3):
+        yield i
+
+
+def test_pipeline_iter_output_2():
+    invocation = totally_random_2()
+    serialized = invocation.serialize()
+    assert serialized['type'] == 'fun_invoke'
+    assert serialized['fun']['type'] == 'fun'
+    assert serialized['fun']['iter_output']
+    invocation.start()
+    assert next(invocation) == 0
+    assert next(invocation) == 1
+    assert next(invocation) == 2
+    assert next(invocation) == 0
+    assert next(invocation) == 1
+    assert next(invocation) == 2
+
+    restored = deserialize(serialized)
+    restored.start()
+    assert next(restored) == 0
+    assert next(restored) == 1
+
+
+@pipeline(iter_output=True, n_epochs=1)
 def only_once():
     return list(range(3))
 
@@ -96,7 +122,7 @@ def test_arguments():
     assert next(restored) == 6
 
 
-@pipeline(flatten_output=True)
+@pipeline(iter_output=True)
 def counter():
     return (i % 2 for i in range(10))
 
@@ -166,7 +192,7 @@ class StateClass:
         self.n = n
 
 
-@pipeline(flatten_output=True, n_epochs=1)
+@pipeline(iter_output=True, n_epochs=1)
 class FlatClass:
     def __init__(self, max_obj):
         self.values = iter(range(max_obj.n))

@@ -17,7 +17,7 @@ def test_module():
     assert get_module(X123) == __name__
     assert get_name(f123) == 'f123'
     assert get_name(X123) == 'X123'
-    assert get_source_data(f123) == {'type': 'func',
+    assert get_source_data(f123) == {'type': 'fun',
                                      'mod': __name__,
                                      'name': 'f123'}
     assert get_source_data(X123) == {'type': 'cls',

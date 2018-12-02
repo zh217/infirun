@@ -1,5 +1,6 @@
 import inspect
 import importlib
+import traceback
 
 from .wrapped import ensure_wrapped, Wrapped, Constant
 
@@ -7,7 +8,7 @@ from .wrapped import ensure_wrapped, Wrapped, Constant
 class PipelineFunctionInvocation(Wrapped):
     @staticmethod
     def deserialize(serialized):
-        fn_wrapper = PipelineFunctionWrapper.deserialize(serialized['func'])
+        fn_wrapper = PipelineFunctionWrapper.deserialize(serialized['fun'])
         args = [deserialize(a) for a in serialized['args']]
         kwargs = {k: deserialize(a) for k, a in serialized['kwargs'].items()}
         return PipelineFunctionInvocation(fn_wrapper,
@@ -18,14 +19,14 @@ class PipelineFunctionInvocation(Wrapped):
         self.fn_wrapper = fn_wrapper
         self.args = [ensure_wrapped(a) for a in args]
         self.kwargs = {k: ensure_wrapped(v) for k, v in kwargs.items()}
-        self.flatten_output = fn_wrapper.flatten_output
-        self.flatten_output_buffer = iter(())
+        self.iter_output = fn_wrapper.iter_output
+        self.iter_output_buffer = iter(())
         self.n_epochs_left = fn_wrapper.n_epochs
 
     def serialize(self):
         return {
-            'type': 'func_invoke',
-            'func': self.fn_wrapper.serialize(),
+            'type': 'fun_invoke',
+            'fun': self.fn_wrapper.serialize(),
             'args': [a.serialize() for a in self.args],
             'kwargs': {k: v.serialize() for k, v in self.kwargs.items()}
         }
@@ -34,9 +35,9 @@ class PipelineFunctionInvocation(Wrapped):
         pass
 
     def __next__(self):
-        if self.flatten_output:
+        if self.iter_output:
             try:
-                return next(self.flatten_output_buffer)
+                return next(self.iter_output_buffer)
             except StopIteration:
                 if self.n_epochs_left == 0:
                     raise
@@ -44,8 +45,8 @@ class PipelineFunctionInvocation(Wrapped):
                 if self.n_epochs_left is not None:
                     self.n_epochs_left -= 1
 
-                self.flatten_output_buffer = iter(self._invoke_raw())
-                return next(self.flatten_output_buffer)
+                self.iter_output_buffer = iter(self._invoke_raw())
+                return next(self.iter_output_buffer)
         else:
             return self._invoke_raw()
 
@@ -61,18 +62,18 @@ class PipelineFunctionInvocation(Wrapped):
 class PipelineFunctionWrapper:
     @staticmethod
     def deserialize(serialized):
-        func = getattr(importlib.import_module(serialized['module']), serialized['name'])
+        fun = getattr(importlib.import_module(serialized['module']), serialized['name'])
 
-        if isinstance(func, PipelineFunctionWrapper):
-            return func
+        if isinstance(fun, PipelineFunctionWrapper):
+            return fun
 
-        return PipelineFunctionWrapper(func,
-                                       flatten_output=serialized['flatten_output'],
+        return PipelineFunctionWrapper(fun,
+                                       iter_output=serialized['iter_output'],
                                        n_epochs=serialized['n_epochs'])
 
-    def __init__(self, wrapped, flatten_output=False, n_epochs=None):
+    def __init__(self, wrapped, iter_output=False, n_epochs=None):
         self.raw = wrapped
-        self.flatten_output = flatten_output
+        self.iter_output = iter_output
         self.n_epochs = n_epochs
 
     def __call__(self, *args, **kwargs):
@@ -80,10 +81,10 @@ class PipelineFunctionWrapper:
 
     def serialize(self):
         return {
-            'type': 'func',
+            'type': 'fun',
             'module': self.raw.__module__,
             'name': self.raw.__name__,
-            'flatten_output': self.flatten_output,
+            'iter_output': self.iter_output,
             'n_epochs': self.n_epochs
         }
 
@@ -99,31 +100,23 @@ class PipelineClassWrapperInstanceInvocation(Wrapped):
         self.args = [ensure_wrapped(a) for a in args]
         self.kwargs = {k: ensure_wrapped(a) for k, a in kwargs.items()}
         self.inst = None
-        self.flatten_output_buffer = iter(())
-        self.flatten_output = inst_wrapper.cls_wrapper.flatten_output
+        self.iter_output_buffer = iter(())
+        self.iter_output = inst_wrapper.cls_wrapper.iter_output
         self.n_epochs_left = inst_wrapper.cls_wrapper.n_epochs
-        self.runner = None
-        self.runner_inst = None
-
-    def set_runner_for_upstream(self, runner):
-        self.runner = runner
 
     def __next__(self):
-        if self.runner_inst is not None:
-            return next(self.runner_inst)
-
-        if self.flatten_output:
+        if self.iter_output:
             try:
-                return next(self.flatten_output_buffer)
+                return next(self.iter_output_buffer)
             except StopIteration:
                 if self.n_epochs_left == 0:
-                    raise
+                    raise StopIteration
 
                 if self.n_epochs_left is not None:
                     self.n_epochs_left -= 1
 
-                self.flatten_output_buffer = iter(self._invoke_raw())
-                return next(self.flatten_output_buffer)
+                self.iter_output_buffer = iter(self._invoke_raw())
+                return next(self.iter_output_buffer)
         else:
             return self._invoke_raw()
 
@@ -131,7 +124,7 @@ class PipelineClassWrapperInstanceInvocation(Wrapped):
         return self
 
     def _invoke_raw(self):
-        args = (next(a) for a in self.args)
+        args = [next(a) for a in self.args]
         kwargs = {k: next(a) for k, a in self.kwargs.items()}
         if self.method is None:
             return self.inst(*args, **kwargs)
@@ -139,12 +132,6 @@ class PipelineClassWrapperInstanceInvocation(Wrapped):
             return getattr(self.inst, self.method)(*args, **kwargs)
 
     def start(self):
-        if self.runner is None:
-            self._start_plain()
-        else:
-            self.runner_inst = self.runner.start(self.serialize())
-
-    def _start_plain(self):
         for a in self.args:
             a.start()
 
@@ -155,7 +142,7 @@ class PipelineClassWrapperInstanceInvocation(Wrapped):
 
     def serialize(self):
         return {
-            'type': 'pipe_inst_invoke',
+            'type': 'obj_invoke',
             'inst': self.inst_wrapper.serialize(),
             'method': self.method,
             'args': [a.serialize() for a in self.args],
@@ -197,7 +184,7 @@ class PipelineClassWrapperInstance:
 
     def serialize(self):
         return {
-            'type': 'pipe_inst',
+            'type': 'obj',
             'cls': self.cls_wrapper.serialize(),
             'args': [a.serialize() for a in self.args],
             'kwargs': {k: a.serialize() for k, a in self.kwargs.items()}
@@ -213,11 +200,11 @@ class PipelineClassWrapper:
             return cls
 
         return PipelineClassWrapper(cls,
-                                    flatten_output=serialized['flatten_output'],
+                                    iter_output=serialized['iter_output'],
                                     n_epochs=serialized['n_epochs'])
 
-    def __init__(self, cls, flatten_output=False, n_epochs=None):
-        self.flatten_output = flatten_output
+    def __init__(self, cls, iter_output=False, n_epochs=None):
+        self.iter_output = iter_output
         self.n_epochs = n_epochs
         self.raw = cls
 
@@ -229,8 +216,8 @@ class PipelineClassWrapper:
 
     def serialize(self):
         return {
-            'type': 'pipe_cls',
-            'flatten_output': self.flatten_output,
+            'type': 'cls',
+            'iter_output': self.iter_output,
             'n_epochs': self.n_epochs,
             'module': self.raw.__module__,
             'name': self.raw.__name__
@@ -247,23 +234,23 @@ def _make_pipeline_decorator(**kwargs):
     return decorator
 
 
-def pipeline(*args, flatten_output=False, n_epochs=None):
+def pipeline(*args, iter_output=False, n_epochs=None):
     if len(args) == 1:
         return pipeline()(*args)
 
-    return _make_pipeline_decorator(flatten_output=flatten_output, n_epochs=n_epochs)
+    return _make_pipeline_decorator(iter_output=iter_output, n_epochs=n_epochs)
 
 
 def deserialize(serialized):
     s_type = serialized['type']
 
-    if s_type == 'func_invoke':
+    if s_type == 'fun_invoke':
         return PipelineFunctionInvocation.deserialize(serialized)
     elif s_type == 'const':
         return Constant.deserialize(serialized)
     elif s_type == 'switch':
         return SwitchCase.deserialize(serialized)
-    elif s_type == 'comp_inst':
+    elif s_type == 'comp_obj':
         return ComponentWrapperInstance.deserialize(serialized)
 
 
@@ -359,7 +346,7 @@ class ComponentWrapperInstance:
 
     def serialize(self):
         return {
-            'type': 'comp_inst',
+            'type': 'comp_obj',
             'comp': self.comp.serialize(),
             'args': [a.serialize() for a in self.args],
             'kwargs': {k: a.serialize() for k, a in self.kwargs.items()}
