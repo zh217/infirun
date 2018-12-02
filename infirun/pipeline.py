@@ -49,11 +49,16 @@ class Invocation(abc.ABC):
     def set_upstream_runner(self, runner_cls, *args, **kwargs):
         self._runner = RunnerWrapper(runner_cls, args, kwargs)
 
-    def __init__(self, runner=None):
+    def __init__(self, runner=None, name=None):
+        self.name = name
         if runner is None:
             self._runner = RunnerWrapper()
         else:
             self._runner = runner
+
+    def set_name(self, name):
+        self.name = name
+        return self
 
 
 class PipelineFunctionWrapper:
@@ -96,19 +101,21 @@ class PipelineFunctionInvocation(Wrapped, Invocation):
         return PipelineFunctionInvocation(fn_wrapper,
                                           args=args,
                                           kwargs=kwargs,
-                                          runner=runner)
+                                          runner=runner,
+                                          name=serialized['name'])
 
     def serialize(self):
         return {
             'type': 'fun_invoke',
+            'name': self.name,
             'fun': self.fn_wrapper.serialize(),
             'args': [a.serialize() for a in self.args],
             'kwargs': {k: v.serialize() for k, v in self.kwargs.items()},
             'runner': self.serialize_runner()
         }
 
-    def __init__(self, fn_wrapper, args, kwargs, runner=None):
-        super().__init__(runner)
+    def __init__(self, fn_wrapper, args, kwargs, runner=None, name=None):
+        super().__init__(runner, name)
         self.fn_wrapper = fn_wrapper
         self.args = [ensure_wrapped(a) for a in args]
         self.kwargs = {k: ensure_wrapped(v) for k, v in kwargs.items()}
@@ -232,11 +239,13 @@ class PipelineClassWrapperInstanceInvocation(Wrapped, Invocation):
         kwargs = {k: deserialize(a) for k, a in serialized['kwargs'].items()}
         inst = PipelineClassWrapperInstance.deserialize(serialized['inst'])
         runner = RunnerWrapper.deserialize(serialized['runner'])
-        return PipelineClassWrapperInstanceInvocation(inst, serialized['method'], args, kwargs, runner)
+        return PipelineClassWrapperInstanceInvocation(inst, serialized['method'], args, kwargs, runner,
+                                                      serialized['name'])
 
     def serialize(self):
         return {
             'type': 'obj_invoke',
+            'name': self.name,
             'inst': self.inst_wrapper.serialize(),
             'method': self.method,
             'args': [a.serialize() for a in self.args],
@@ -244,8 +253,8 @@ class PipelineClassWrapperInstanceInvocation(Wrapped, Invocation):
             'runner': self.serialize_runner()
         }
 
-    def __init__(self, inst_wrapper, method, args, kwargs, runner=None):
-        super().__init__(runner)
+    def __init__(self, inst_wrapper, method, args, kwargs, runner=None, name=None):
+        super().__init__(runner, name)
         self.inst_wrapper = inst_wrapper
         self.method = method
         self.args = [ensure_wrapped(a) for a in args]

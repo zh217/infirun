@@ -64,17 +64,17 @@ def test_runner_example():
 
     :return:
     """
-    n_gen = number_gen()
+    n_gen = number_gen().set_name('n_gen')
     mult1 = Multiplier(2)
-    mult1_res = mult1(n_gen)
+    mult1_res = mult1(n_gen).set_name('mult1')
     mult2 = Multiplier(3)
-    mult2_res = mult2(mult1_res)
+    mult2_res = mult2(mult1_res).set_name('mult2')
     mult3 = Multiplier(5)
-    mult3_res = mult3(mult2_res)
-    n_gen2 = number_gen()
+    mult3_res = mult3(mult2_res).set_name('mult3')
+    n_gen2 = number_gen().set_name('n_gen2')
     mult4 = Multiplier(10)
-    mult4_res = mult4(n_gen2)
-    final = multiply(m=mult3_res, n=mult4_res)
+    mult4_res = mult4(n_gen2).set_name('mult4_res')
+    final = multiply(m=mult3_res, n=mult4_res).set_name('final')
 
     mult3_res.set_upstream_runner(Invocation)
     mult1_res.set_upstream_runner(Invocation)
@@ -83,19 +83,15 @@ def test_runner_example():
     final.start()
 
     print()
-    # print(list(final))
+
     pprint(final.serialize())
 
     collected = {}
     n, root = chop_serialized(final.serialize(), 0, collected)
 
-    # print('-------- 0')
-    print()
-    pprint(root)
-
     for k, v in collected.items():
-        # print(f'-------- {k}')
         print()
         pprint(v, prefix=f'P[{k}]')
 
-    # pp.pprint(root)
+    print()
+    pprint(root)

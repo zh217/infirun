@@ -124,15 +124,18 @@ class PipelineSink:
 def pprint(serialized, level=0, prefix='root', outfile=None):
     s_type = serialized['type']
 
-    if s_type == 'placeholder':
-        print(f'{"  " * level} {prefix} [P]: {serialized["idx"]}')
+    if s_type not in ['fun_invoke', 'obj_invoke', 'placeholder']:
         return
 
-    if s_type not in ['fun_invoke', 'obj_invoke']:
+    name = serialized['name']
+    name_str = f' <{name}>' if name else ''
+
+    if s_type == 'placeholder':
+        print(f'{"  " * level} {prefix} [P]:{name_str} {serialized["idx"]}')
         return
 
     runner_str = " [R]" if serialized["runner"]["has_runner"] else ""
-    prefix_str = f'{"  " * level} {prefix}{runner_str}: '
+    prefix_str = f'{"  " * level} {prefix}{runner_str}:{name_str} '
 
     if s_type == 'obj_invoke':
         print(prefix_str +
@@ -167,6 +170,7 @@ def chop_serialized(serialized, n, collected):
         if should_chop(arg):
             current += 1
             ret['args'][i] = {'type': 'placeholder',
+                              'name': arg['name'],
                               'idx': current}
             collected[current] = chopped
 
@@ -176,6 +180,7 @@ def chop_serialized(serialized, n, collected):
         if should_chop(arg):
             current += 1
             ret['kwargs'][k] = {'type': 'placeholder',
+                                'name': arg['name'],
                                 'idx': current}
             collected[current] = chopped
 
