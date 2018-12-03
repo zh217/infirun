@@ -1,9 +1,7 @@
 import inspect
 import importlib
 import abc
-import functools
 import json
-import sys
 
 from .wrapped import ensure_wrapped, Wrapped, ensure_constant, Constant
 
@@ -125,6 +123,7 @@ class PipelineFunctionInvocation(Wrapped, Invocation):
         self.iter_output = fn_wrapper.iter_output
         self.iter_output_buffer = iter(())
         self.n_epochs_left = fn_wrapper.n_epochs
+        self.invoker = None
 
     def start(self):
         for a in self.args:
@@ -132,6 +131,8 @@ class PipelineFunctionInvocation(Wrapped, Invocation):
 
         for a in self.kwargs.values():
             a.start()
+
+        self.invoker = self.fn_wrapper.raw
 
     def __next__(self):
         if self.iter_output:
@@ -155,7 +156,7 @@ class PipelineFunctionInvocation(Wrapped, Invocation):
     def _invoke_raw(self):
         args = (next(a) for a in self.args)
         kwargs = {k: next(a) for k, a in self.kwargs.items()}
-        return self.fn_wrapper.raw(*args, **kwargs)
+        return self.invoker(*args, **kwargs)
 
 
 class PipelineClassWrapper:
@@ -266,6 +267,7 @@ class PipelineClassWrapperInstanceInvocation(Wrapped, Invocation):
         self.iter_output_buffer = iter(())
         self.iter_output = inst_wrapper.cls_wrapper.iter_output
         self.n_epochs_left = inst_wrapper.cls_wrapper.n_epochs
+        self.invoker = None
 
     def __next__(self):
         if self.iter_output:
@@ -289,10 +291,7 @@ class PipelineClassWrapperInstanceInvocation(Wrapped, Invocation):
     def _invoke_raw(self):
         args = [next(a) for a in self.args]
         kwargs = {k: next(a) for k, a in self.kwargs.items()}
-        if self.method is None:
-            return self.inst(*args, **kwargs)
-        else:
-            return getattr(self.inst, self.method)(*args, **kwargs)
+        return self.invoker(*args, **kwargs)
 
     def start(self):
         for a in self.args:
@@ -302,6 +301,10 @@ class PipelineClassWrapperInstanceInvocation(Wrapped, Invocation):
             a.start()
 
         self.inst = self.inst_wrapper.start()
+        if self.method is None:
+            self.invoker = self.inst
+        else:
+            self.invoker = getattr(self.inst, self.method)
 
 
 class SwitchCase(Wrapped):

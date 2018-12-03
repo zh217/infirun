@@ -81,6 +81,7 @@ def only_once():
 
 def test_epoch():
     invocation = only_once()
+    invocation.start()
     assert next(invocation) == 0
     assert next(invocation) == 1
     assert next(invocation) == 2
@@ -104,6 +105,7 @@ def plus(m, n):
 
 def test_arguments():
     x2_invoke = times_two(1)
+    x2_invoke.start()
     assert next(x2_invoke) == 2
 
     serialized = x2_invoke.serialize()
@@ -113,6 +115,7 @@ def test_arguments():
 
     x2_invoke_2 = times_two(2)
     plus_invoke = plus(x2_invoke, n=x2_invoke_2)
+    plus_invoke.start()
     assert next(plus_invoke) == 6
 
     serialized = plus_invoke.serialize()
@@ -134,6 +137,7 @@ def test_switch_case():
                    {0: a,
                     1: b})
     y = times_two(x)
+    y.start()
     assert next(y) == 4
     assert next(y) == 0
     assert next(y) == 4
