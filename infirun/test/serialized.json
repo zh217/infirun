@@ -1,0 +1,215 @@
+{
+  "type": "fun_invoke",
+  "name": "final",
+  "fun": {
+    "type": "fun",
+    "module": "infirun.test.test_runner",
+    "name": "combiner",
+    "iter_output": false,
+    "n_epochs": null
+  },
+  "args": [],
+  "kwargs": {
+    "m": {
+      "type": "obj_invoke",
+      "name": "mult3",
+      "inst": {
+        "type": "obj",
+        "cls": {
+          "type": "cls",
+          "iter_output": false,
+          "n_epochs": null,
+          "module": "infirun.test.test_runner",
+          "name": "Multiplier"
+        },
+        "args": [
+          {
+            "type": "const",
+            "value": 5
+          }
+        ],
+        "kwargs": {}
+      },
+      "method": null,
+      "args": [
+        {
+          "type": "obj_invoke",
+          "name": "mult2",
+          "inst": {
+            "type": "obj",
+            "cls": {
+              "type": "cls",
+              "iter_output": false,
+              "n_epochs": null,
+              "module": "infirun.test.test_runner",
+              "name": "Multiplier"
+            },
+            "args": [
+              {
+                "type": "const",
+                "value": 3
+              }
+            ],
+            "kwargs": {}
+          },
+          "method": null,
+          "args": [
+            {
+              "type": "obj_invoke",
+              "name": "mult1",
+              "inst": {
+                "type": "obj",
+                "cls": {
+                  "type": "cls",
+                  "iter_output": false,
+                  "n_epochs": null,
+                  "module": "infirun.test.test_runner",
+                  "name": "Multiplier"
+                },
+                "args": [
+                  {
+                    "type": "const",
+                    "value": 2
+                  }
+                ],
+                "kwargs": {}
+              },
+              "method": null,
+              "args": [
+                {
+                  "type": "fun_invoke",
+                  "name": "n_gen",
+                  "fun": {
+                    "type": "fun",
+                    "module": "infirun.test.test_runner",
+                    "name": "number_gen",
+                    "iter_output": true,
+                    "n_epochs": 1
+                  },
+                  "args": [
+                    {
+                      "type": "const",
+                      "value": 100000
+                    }
+                  ],
+                  "kwargs": {},
+                  "runner": {
+                    "type": "runner",
+                    "has_runner": true,
+                    "module": "infirun.runner",
+                    "name": "ProcessRunner",
+                    "args": [],
+                    "kwargs": {}
+                  }
+                }
+              ],
+              "kwargs": {},
+              "runner": {
+                "type": "runner",
+                "has_runner": true,
+                "module": "infirun.runner",
+                "name": "ProcessRunner",
+                "args": [],
+                "kwargs": {
+                  "n_process": {
+                    "type": "const",
+                    "value": 2
+                  },
+                  "process_type": {
+                    "type": "const",
+                    "value": "process"
+                  }
+                }
+              }
+            }
+          ],
+          "kwargs": {},
+          "runner": {
+            "type": "runner",
+            "has_runner": false,
+            "module": null,
+            "name": null,
+            "args": [],
+            "kwargs": {}
+          }
+        }
+      ],
+      "kwargs": {},
+      "runner": {
+        "type": "runner",
+        "has_runner": true,
+        "module": "infirun.runner",
+        "name": "ProcessRunner",
+        "args": [],
+        "kwargs": {}
+      }
+    },
+    "n": {
+      "type": "obj_invoke",
+      "name": "mult4_res",
+      "inst": {
+        "type": "obj",
+        "cls": {
+          "type": "cls",
+          "iter_output": false,
+          "n_epochs": null,
+          "module": "infirun.test.test_runner",
+          "name": "Multiplier"
+        },
+        "args": [
+          {
+            "type": "const",
+            "value": 10
+          }
+        ],
+        "kwargs": {}
+      },
+      "method": null,
+      "args": [
+        {
+          "type": "fun_invoke",
+          "name": "n_gen2",
+          "fun": {
+            "type": "fun",
+            "module": "infirun.test.test_runner",
+            "name": "number_gen",
+            "iter_output": true,
+            "n_epochs": 1
+          },
+          "args": [
+            {
+              "type": "const",
+              "value": 100000
+            }
+          ],
+          "kwargs": {},
+          "runner": {
+            "type": "runner",
+            "has_runner": true,
+            "module": "infirun.runner",
+            "name": "ProcessRunner",
+            "args": [],
+            "kwargs": {}
+          }
+        }
+      ],
+      "kwargs": {},
+      "runner": {
+        "type": "runner",
+        "has_runner": false,
+        "module": null,
+        "name": null,
+        "args": [],
+        "kwargs": {}
+      }
+    }
+  },
+  "runner": {
+    "type": "runner",
+    "has_runner": false,
+    "module": null,
+    "name": null,
+    "args": [],
+    "kwargs": {}
+  }
+}

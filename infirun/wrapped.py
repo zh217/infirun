@@ -47,3 +47,9 @@ def ensure_constant(obj):
         return obj
     else:
         return Constant(obj)
+
+
+def ensure_unwrapped_constant(obj):
+    if isinstance(obj, Constant):
+        return obj.raw
+    return obj

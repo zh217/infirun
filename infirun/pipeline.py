@@ -1,6 +1,9 @@
 import inspect
 import importlib
 import abc
+import functools
+import json
+import sys
 
 from .wrapped import ensure_wrapped, Wrapped, ensure_constant, Constant
 
@@ -13,7 +16,7 @@ class RunnerWrapper:
         else:
             runner_cls = getattr(importlib.import_module(serialized['module']), serialized['name'])
         args = [deserialize(a) for a in serialized['args']]
-        kwargs = {k: deserialize(a) for k, a in serialized['kwargs']}
+        kwargs = {k: deserialize(a) for k, a in serialized['kwargs'].items()}
         return RunnerWrapper(runner_cls, args, kwargs)
 
     def serialize(self):
@@ -435,14 +438,106 @@ def ensure_component_argument(arg):
     return Constant(arg)
 
 
+class PipelineOutProxy(Wrapped):
+    @staticmethod
+    def deserialize(serialized):
+        return PipelineOutProxy(serialized['queue'])
+
+    def __init__(self, queue):
+        self.queue = queue
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        data = self.queue.get()
+        if data == StopIteration:
+            raise StopIteration
+        return data
+
+    def start(self):
+        pass
+
+
 type_map = {
     'fun_invoke': PipelineFunctionInvocation,
     'obj_invoke': PipelineClassWrapperInstanceInvocation,
     'const': Constant,
     'switch': SwitchCase,
-    'comp_obj': ComponentWrapperInstance
+    'comp_obj': ComponentWrapperInstance,
+    'placeholder': PipelineOutProxy
 }
 
 
 def deserialize(serialized):
     return type_map[serialized['type']].deserialize(serialized)
+
+
+class PipelineInProxy:
+    def __init__(self, queue, pipeline):
+        self.queue = queue
+        self.pipeline = pipeline
+
+    def start(self):
+        self.pipeline.start()
+        try:
+            while True:
+                self.queue.put(next(self.pipeline))
+        except StopIteration:
+            self.queue.put(StopIteration)
+
+
+class PipelineSink:
+    def __init__(self, pipeline, callback=None):
+        self.pipeline = pipeline
+        self.callback = callback
+
+    def start(self):
+        self.pipeline.start()
+        if self.callback:
+            for v in self.pipeline:
+                self.callback(v)
+        else:
+            for el in self.pipeline:
+                pass
+                # print(el)
+
+
+def augment_serialized(serialized, upstream_qs):
+    if not serialized.get('type'):
+        return
+
+    s_type = serialized['type']
+
+    if s_type in ['fun_invoke', 'obj_invoke']:
+        for a in serialized['args'] + list(serialized['kwargs'].values()):
+            augment_serialized(a, upstream_qs)
+
+    if s_type == 'placeholder':
+        serialized['queue'] = upstream_qs[serialized['idx']]
+
+
+def run_in_process(serialized, downstream_q, upstream_qs, identifier):
+    try:
+        augment_serialized(serialized, upstream_qs)
+        restored = deserialize(serialized)
+        if downstream_q:
+            starter = PipelineInProxy(downstream_q, restored)
+        else:
+            starter = PipelineSink(restored)
+        starter.start()
+    except Exception as e:
+        if downstream_q:
+            downstream_q.put(StopIteration)
+        raise e
+
+
+def serialize_to_file(pipe_def, outfile=None, pretty=True):
+    serialized = pipe_def.serialize()
+
+    if outfile is None:
+        print(json.dumps(serialized, ensure_ascii=False, indent=2 if pretty else None))
+        return
+
+    with open(outfile, 'w', encoding='utf-8') as f:
+        json.dump(serialized, f, ensure_ascii=False, indent=2 if pretty else None)

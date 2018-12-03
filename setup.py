@@ -10,5 +10,9 @@ setup(
     author='Ziyang Hu',
     author_email='hu.ziyang@cantab.net',
     description='TBA',
-    tests_require=['pytest']
+    tests_require=['pytest', 'pytest-timeout'],
+    install_requires=['tarjan'],
+    entry_points={
+        'console_scripts': ['infirun=infirun.cli:main'],
+    },
 )

@@ -1,124 +1,64 @@
 import abc
+import copy
+import tarjan
 
-from .wrapped import Wrapped
+from .wrapped import ensure_unwrapped_constant
+from .pipeline import RunnerWrapper, run_in_process, deserialize
 
 
 class Runner(abc.ABC):
-
-    def start_upstream_runners(self, serialized):
-        pass
+    pass
 
 
-class ThreadPoolRunner(Runner):
-    @staticmethod
-    def deserialize(serialized):
-        pass
+class ProcessRunner(Runner):
 
-    def __init__(self):
-        pass
+    def __init__(self, queue_size=1, n_process=1, process_type='thread'):
+        assert process_type in ['thread', 'pytorch', 'process']
+        self.queue_size = ensure_unwrapped_constant(queue_size)
+        assert self.queue_size >= 1
+        self.n_process = ensure_unwrapped_constant(n_process)
+        assert self.n_process >= 1
+        self.process_type = ensure_unwrapped_constant(process_type)
+        self.started = False
+        self.processes = []
 
-    def start(self, pipeline):
-        pass
+    def negotiate_queue_with_downstream(self, other):
+        if other is None:
+            return None
 
-    def __iter__(self):
-        pass
+        if self.process_type == 'pytorch' or other.process_type == 'pytorch':
+            import torch.multiprocessing
+            return torch.multiprocessing.Queue
+        elif self.process_type == 'process' or other.process_type == 'process':
+            import multiprocessing
+            return multiprocessing.Queue
+        elif self.process_type == 'thread' or other.process_type == 'thread':
+            import multiprocessing.dummy
+            return multiprocessing.dummy.Queue
 
-    def __next__(self):
-        pass
-
-    def serialize(self):
-        pass
-
-
-class ProcessPoolRunner(Runner):
-    @staticmethod
-    def deserialize(serialized):
-        pass
-
-    def __init__(self):
-        pass
-
-    def start(self, serialized):
-        total, found_upstream_runner_dict = mark_serialization(serialized)
-
-    def __iter__(self):
-        pass
-
-    def __next__(self):
-        pass
-
-    def serialize(self):
-        pass
-
-
-def mark_serialization(serialized, n=0):
-    if serialized['type'] not in ['fun_invoke', 'obj_invoke']:
-        return serialized, n
-
-    current = n
-    found = {}
-
-    for arg in serialized['args']:
-        if 'runner' in arg:
-            current += 1
-            arg['runner_mark'] = current
-            found[current] = arg
+    def get_process_constructor(self):
+        if self.process_type == 'pytorch':
+            import torch.multiprocessing
+            return torch.multiprocessing.Process
+        elif self.process_type == 'process':
+            import multiprocessing
+            return multiprocessing.Process
         else:
-            current, new_found = mark_serialization(arg, current)
-            found.update(new_found)
+            import multiprocessing.dummy
+            return multiprocessing.dummy.Process
 
-    for arg in serialized['kwargs'].values():
-        if 'runner' in arg:
-            current += 1
-            arg['runner_mark'] = current
-            found[current] = arg
-        else:
-            current, new_found = mark_serialization(arg, current)
-            found.update(new_found)
+    def start(self, serialized, downsteam_q, upstream_qs):
+        if self.started:
+            raise RuntimeError('Runner already started')
 
-    return current, found
+        for i in range(self.n_process):
+            Process = self.get_process_constructor()
+            p = Process(target=run_in_process, args=(serialized, downsteam_q, upstream_qs, i))
+            self.processes.append(p)
+            p.daemon = True
+            p.start()
 
-
-class PipelineInProxy:
-    def __init__(self, queue, pipeline):
-        self.queue = queue
-        self.pipeline = pipeline
-
-    def start(self):
-        try:
-            while True:
-                self.queue.put(next(self.pipeline))
-        except StopIteration:
-            pass
-
-
-class PipelineOutProxy(Wrapped):
-    def __init__(self, queue):
-        self.queue = queue
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return self.queue.get()
-
-    def start(self):
-        pass
-
-
-class PipelineSink:
-    def __init__(self, pipeline, callback=None):
-        self.pipeline = pipeline
-        self.callback = callback
-
-    def start(self):
-        self.pipeline.start()
-        if self.callback:
-            for v in self.pipeline:
-                self.callback(v)
-        else:
-            for _ in self.pipeline:
-                pass
+        self.started = True
 
 
 def pprint(serialized, level=0, prefix='root', outfile=None):
@@ -155,19 +95,22 @@ def pprint(serialized, level=0, prefix='root', outfile=None):
         pprint(v, level + 1, prefix=k, outfile=outfile)
 
 
-def should_chop(serialized):
+def _should_chop(serialized):
     return serialized['type'] in ['fun_invoke', 'obj_invoke'] and serialized['runner']['has_runner']
 
 
-def chop_serialized(serialized, n, collected):
+def _chop_serialized(serialized, n, collected):
     # ret = {k: v for k, v in serialized.items()}
     ret = serialized
     current = n
 
+    if ret['type'] == 'const':
+        return current, ret
+
     for i in range(len(ret['args'])):
         arg = ret['args'][i]
-        current, chopped = chop_serialized(arg, current, collected)
-        if should_chop(arg):
+        current, chopped = _chop_serialized(arg, current, collected)
+        if _should_chop(arg):
             current += 1
             ret['args'][i] = {'type': 'placeholder',
                               'name': arg['name'],
@@ -176,8 +119,8 @@ def chop_serialized(serialized, n, collected):
 
     for k in ret['kwargs']:
         arg = ret['kwargs'][k]
-        current, chopped = chop_serialized(arg, current, collected)
-        if should_chop(arg):
+        current, chopped = _chop_serialized(arg, current, collected)
+        if _should_chop(arg):
             current += 1
             ret['kwargs'][k] = {'type': 'placeholder',
                                 'name': arg['name'],
@@ -185,3 +128,85 @@ def chop_serialized(serialized, n, collected):
             collected[current] = chopped
 
     return current, ret
+
+
+def _generate_dependency(serialized):
+    found = []
+    for arg in serialized['args']:
+        if arg['type'] == 'placeholder':
+            found.append(arg['idx'])
+        elif arg['type'] in ['fun_invoke', 'obj_invoke']:
+            found.extend(_generate_dependency(arg))
+
+    for arg in serialized['kwargs'].values():
+        if arg['type'] == 'placeholder':
+            found.append(arg['idx'])
+        elif arg['type'] in ['fun_invoke', 'obj_invoke']:
+            found.extend(_generate_dependency(arg))
+    return found
+
+
+def generate_dependency_map(serialized):
+    serialized = copy.deepcopy(serialized)
+    collected = {}
+    n, root = _chop_serialized(serialized, 0, collected)
+    if not root['runner']['has_runner']:
+        root['runner'] = RunnerWrapper(ProcessRunner).serialize()
+    collected[0] = root
+    deps = {k: _generate_dependency(v) for k, v in collected.items()}
+    inv_deps = {}
+    for k, vs in deps.items():
+        for v in vs:
+            inv_deps[v] = k
+    _ordered = tarjan.tarjan(deps)
+    ordered = []
+    for o in _ordered:
+        if len(o) > 1:
+            raise RuntimeError('Cycle detected in dataflow')
+        ordered.append((o[0], deps[o[0]], inv_deps.get(o[0], None)))
+    return collected, ordered
+
+
+def _queue_to_gen(q):
+    while True:
+        data = q.get()
+        if data == StopIteration:
+            break
+        yield data
+
+
+def run_with_runner(serialized, return_iter=False):
+    dep_maps, order = generate_dependency_map(serialized)
+    runner_map = {}
+    for k, v in dep_maps.items():
+        runner_def = v['runner']
+        args = [deserialize(a).raw for a in runner_def['args']]
+        kwargs = {k: deserialize(a).raw for k, a in runner_def['kwargs'].items()}
+        runner_map[k] = ProcessRunner(*args, **kwargs)
+
+    downstream_queues = {}
+
+    for i, _, downstream_idx in order:
+        runner = runner_map[i]
+        downstream_runner = runner_map.get(downstream_idx, None)
+        Queue = runner.negotiate_queue_with_downstream(downstream_runner)
+        downstream_queues[i] = Queue and Queue(maxsize=runner.queue_size)
+
+    root_runner = runner_map[0]
+
+    if return_iter:
+        Queue = root_runner.negotiate_queue_with_downstream(root_runner)
+        downstream_queues[0] = Queue(maxsize=1)
+
+    for i, upstream_idxs, downstream_idx in order:
+        runner = runner_map[i]
+        serialized = dep_maps[i]
+        down_q = downstream_queues[i]
+        up_qs = {k: downstream_queues[k] for k in upstream_idxs}
+        runner.start(serialized, down_q, up_qs)
+
+    if return_iter:
+        return _queue_to_gen(downstream_queues[0])
+    else:
+        for p in root_runner.processes:
+            p.join()
