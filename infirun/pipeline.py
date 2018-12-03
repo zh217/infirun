@@ -2,11 +2,8 @@ import inspect
 import importlib
 import abc
 import json
-from collections import namedtuple
 
 from .wrapped import ensure_wrapped, Wrapped, ensure_constant, Constant
-
-MetaData = namedtuple('MetaData', ['type', 'data'])
 
 
 class RunnerWrapper:
@@ -172,9 +169,7 @@ class PipelineClassWrapper:
 
         return PipelineClassWrapper(cls,
                                     iter_output=serialized['iter_output'],
-                                    n_epochs=serialized['n_epochs'],
-                                    invoker=serialized['invoker'],
-                                    meta_invokers=serialized['meta_invokers'])
+                                    n_epochs=serialized['n_epochs'])
 
     def serialize(self):
         return {
@@ -182,14 +177,10 @@ class PipelineClassWrapper:
             'iter_output': self.iter_output,
             'n_epochs': self.n_epochs,
             'module': self.raw.__module__,
-            'name': self.raw.__name__,
-            'invoker': self.invoker,
-            'meta_invokers': self.meta_invokers
+            'name': self.raw.__name__
         }
 
-    def __init__(self, cls, iter_output=False, n_epochs=None, invoker=None, meta_invokers=None):
-        self.invoker = invoker
-        self.meta_invokers = meta_invokers
+    def __init__(self, cls, iter_output=False, n_epochs=None):
         self.iter_output = iter_output
         self.n_epochs = n_epochs
         self.raw = cls
@@ -245,7 +236,6 @@ class PipelineClassWrapperInstance:
         return self.cls_wrapper.raw(*args, **kwargs)
 
 
-# TODO: metadata invokers: some kind of telepathy
 class PipelineClassWrapperInstanceInvocation(Wrapped, Invocation):
     @staticmethod
     def deserialize(serialized):
@@ -352,14 +342,13 @@ def switch_case(value, **choice_dict):
     return SwitchCase(value, choice_dict)
 
 
-def pipeline(*args, iter_output=False, n_epochs=None, invoker=None, meta_invokers=None):
+def pipeline(*args, iter_output=False, n_epochs=None):
     if len(args) == 1:
         return pipeline()(*args)
 
     def decorator(f):
         if inspect.isclass(f):
-            return PipelineClassWrapper(f, iter_output=iter_output, n_epochs=n_epochs,
-                                        invoker=invoker, meta_invokers=meta_invokers)
+            return PipelineClassWrapper(f, iter_output=iter_output, n_epochs=n_epochs)
         else:
             return PipelineFunctionWrapper(f, iter_output=iter_output, n_epochs=n_epochs)
 
