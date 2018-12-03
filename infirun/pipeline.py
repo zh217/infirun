@@ -544,3 +544,12 @@ def serialize_to_file(pipe_def, outfile=None, pretty=True):
 
     with open(outfile, 'w', encoding='utf-8') as f:
         json.dump(serialized, f, ensure_ascii=False, indent=2 if pretty else None)
+
+
+class PersistentState(abc.ABC):
+    def persist_state(self):
+        pass
+
+    @abc.abstractmethod
+    def finalize(self):
+        pass
