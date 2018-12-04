@@ -1,5 +1,4 @@
 import pytest
-import os
 
 from infirun.runner import *
 from ..pipeline import *
@@ -22,29 +21,6 @@ class Multiplier:
 @pipeline
 def multiply(m, n):
     return m * n
-
-
-def test_pipeline():
-    n_gen = number_gen()
-    mult1 = Multiplier(2)
-    mult1_res = mult1(n_gen)
-    mult2 = Multiplier(3)
-    mult2_res = mult2(mult1_res)
-    mult3 = Multiplier(5)
-    mult3_res = mult3(mult2_res)
-
-    vs = []
-    sink = PipelineSink(mult3_res, lambda v: vs.append(v))
-    sink.start()
-    assert vs == list(range(0, 300, 30))
-
-    serialized = mult3_res.serialize()
-    restored = deserialize(serialized)
-
-    vs2 = []
-    sink2 = PipelineSink(restored, lambda v: vs2.append(v))
-    sink2.start()
-    assert vs == list(range(0, 300, 30))
 
 
 @pytest.mark.timeout(5)
@@ -113,28 +89,55 @@ def test_runner_example_2():
     n_gen2.set_upstream_runner(ProcessRunner)
     final.set_upstream_runner(ProcessRunner, process_type='process')
 
-    # final.start()
-    #
-    # print()
-    #
-    # pprint(final.serialize())
-    #
-    # collected, ordered = generate_dependency_map(final.serialize())
-    #
-    # for k, v in collected.items():
-    #     print()
-    #     pprint(v, prefix=f'P[{k}]')
-    #
-    # print(ordered)
     it = run_with_runner(final.serialize(), return_iter=True)
     assert len(list(it)) == 1000
 
-    # try:
-    #     os.mkdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tmp_out'))
-    # except:
-    #     pass
-    #
-    # serialize_to_file(final,
-    #                   os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tmp_out',
-    #                                'serialized.json'),
-    #                   pretty=True)
+
+@pytest.mark.timeout(5)
+def test_runner_anonymous():
+    n = 1000
+    n_gen = number_gen(n)
+    mult1 = Multiplier(2)
+    mult1_res = mult1(n_gen)
+    mult2 = Multiplier(3)
+    mult2_res = mult2(mult1_res)
+    mult3 = Multiplier(5)
+    mult3_res = mult3(mult2_res)
+    n_gen2 = number_gen(n)
+    mult4 = Multiplier(10)
+    mult4_res = mult4(n_gen2)
+    final = combiner(m=mult3_res, n=mult4_res)
+
+    mult3_res.set_upstream_runner(ProcessRunner)
+    mult1_res.set_upstream_runner(ProcessRunner, n_process=2, process_type='process')
+    n_gen.set_upstream_runner(ProcessRunner)
+    n_gen2.set_upstream_runner(ProcessRunner)
+    final.set_upstream_runner(ProcessRunner, process_type='process')
+
+    it = run_with_runner(final.serialize(), return_iter=True)
+    assert len(list(it)) == 1000
+
+
+@pytest.mark.timeout(5)
+def test_runner_name_clash():
+    n = 1000
+    n_gen = number_gen(n).set_name('bad name')
+    mult1 = Multiplier(2)
+    mult1_res = mult1(n_gen).set_name('bad name')
+    mult2 = Multiplier(3)
+    mult2_res = mult2(mult1_res)
+    mult3 = Multiplier(5)
+    mult3_res = mult3(mult2_res)
+    n_gen2 = number_gen(n)
+    mult4 = Multiplier(10)
+    mult4_res = mult4(n_gen2)
+    final = combiner(m=mult3_res, n=mult4_res)
+
+    mult3_res.set_upstream_runner(ProcessRunner)
+    mult1_res.set_upstream_runner(ProcessRunner, n_process=2)
+    n_gen.set_upstream_runner(ProcessRunner)
+    n_gen2.set_upstream_runner(ProcessRunner)
+    final.set_upstream_runner(ProcessRunner)
+
+    with pytest.raises(Exception):
+        run_with_runner(final.serialize())

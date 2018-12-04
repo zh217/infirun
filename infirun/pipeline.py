@@ -3,10 +3,14 @@ import inspect
 import importlib
 import abc
 import json
+import queue
 import sys
+import traceback
 import uuid
 
 from .wrapped import ensure_wrapped, Wrapped, ensure_constant, Constant
+
+QUEUE_WAIT_TIMEOUT = 0.1
 
 
 class RunnerWrapper:
@@ -46,6 +50,10 @@ class RunnerWrapper:
         self.kwargs = {k: ensure_constant(a) for k, a in kwargs.items()}
 
 
+def _ensure_name(name):
+    return name or base64.urlsafe_b64encode(uuid.uuid4().bytes).decode('ascii').strip("=")
+
+
 class Invocation(abc.ABC):
     def serialize_runner(self):
         return self._runner.serialize()
@@ -54,7 +62,7 @@ class Invocation(abc.ABC):
         self._runner = RunnerWrapper(runner_cls, args, kwargs)
 
     def __init__(self, iter_output, n_epochs_left, args, kwargs, runner=None, name=None):
-        self.name = name or base64.urlsafe_b64encode(uuid.uuid4().bytes).decode('ascii').strip("=")
+        self.name = _ensure_name(name)
         if runner is None:
             self._runner = RunnerWrapper()
         else:
@@ -380,21 +388,27 @@ class ComponentWrapperInstance:
         comp = ComponentWrapper.deserialize(serialized['comp'])
         args = [deserialize(a) for a in serialized['args']]
         kwargs = {k: deserialize(a) for k, a in serialized['kwargs']}
-        return ComponentWrapperInstance(comp, args, kwargs)
+        return ComponentWrapperInstance(comp, args, kwargs, serialized['name'])
 
     def serialize(self):
         return {
             'type': 'comp_obj',
             'comp': self.comp.serialize(),
             'args': [a.serialize() for a in self.args],
-            'kwargs': {k: a.serialize() for k, a in self.kwargs.items()}
+            'kwargs': {k: a.serialize() for k, a in self.kwargs.items()},
+            'name': self.name
         }
 
-    def __init__(self, comp, args, kwargs):
+    def __init__(self, comp, args, kwargs, name=None):
         self.comp = comp
         self.args = [ensure_component_argument(a) for a in args]
         self.kwargs = {k: ensure_component_argument(a) for k, a in kwargs.items()}
         self.inst = None
+        self.name = _ensure_name(name)
+
+    def set_name(self, name):
+        self.name = name
+        return self
 
     def start(self):
         for a in self.args:
@@ -439,16 +453,24 @@ def ensure_component_argument(arg):
 class PipelineOutProxy(Wrapped):
     @staticmethod
     def deserialize(serialized):
-        return PipelineOutProxy(serialized['queue'])
+        return PipelineOutProxy(serialized['queue'], serialized['stop_switch'])
 
-    def __init__(self, queue):
+    def __init__(self, queue, stop_switch):
         self.queue = queue
+        self.stop_switch = stop_switch
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        data = self.queue.get()
+        while True:
+            try:
+                data = self.queue.get(timeout=QUEUE_WAIT_TIMEOUT)
+                break
+            except queue.Empty:
+                if self.stop_switch.value:
+                    raise StopIteration
+
         if data == StopIteration:
             raise StopIteration
         # if isinstance(data, Exception):
@@ -474,35 +496,41 @@ def deserialize(serialized):
 
 
 class PipelineInProxy:
-    def __init__(self, queue, pipeline):
+    def __init__(self, queue, pipeline, stop_switch):
         self.queue = queue
         self.pipeline = pipeline
+        self.stop_switch = stop_switch
 
     def start(self):
         self.pipeline.start()
         try:
             while True:
-                self.queue.put(next(self.pipeline))
+                next_value = next(self.pipeline)
+                while True:
+                    try:
+                        self.queue.put(next_value, timeout=QUEUE_WAIT_TIMEOUT)
+                        break
+                    except queue.Full:
+                        if self.stop_switch.value:
+                            print('xxx')
+                            return
         except StopIteration:
             self.queue.put(StopIteration)
 
 
 class PipelineSink:
-    def __init__(self, pipeline, callback=None):
+    def __init__(self, pipeline, stop_switch):
+        self.stop_switch = stop_switch
         self.pipeline = pipeline
-        self.callback = callback
 
     def start(self):
         self.pipeline.start()
-        if self.callback:
-            for v in self.pipeline:
-                self.callback(v)
-        else:
-            for _ in self.pipeline:
-                pass
+        for _ in self.pipeline:
+            if self.stop_switch.value:
+                break
 
 
-def augment_serialized(serialized, upstream_qs):
+def augment_serialized(serialized, upstream_qs, stop_switch):
     if not serialized.get('type'):
         return
 
@@ -510,25 +538,32 @@ def augment_serialized(serialized, upstream_qs):
 
     if s_type in ['fun_invoke', 'obj_invoke']:
         for a in serialized['args'] + list(serialized['kwargs'].values()):
-            augment_serialized(a, upstream_qs)
+            augment_serialized(a, upstream_qs, stop_switch)
 
     if s_type == 'placeholder':
         serialized['queue'] = upstream_qs[serialized['idx']]
+        serialized['stop_switch'] = stop_switch
 
 
-def run_in_process(serialized, downstream_q, upstream_qs, identifier):
+def run_in_process(serialized, downstream_q, upstream_qs, identifier, is_process, stop_switch, error_switch):
     try:
-        augment_serialized(serialized, upstream_qs)
+        augment_serialized(serialized, upstream_qs, stop_switch)
         restored = deserialize(serialized)
         if downstream_q:
-            starter = PipelineInProxy(downstream_q, restored)
+            starter = PipelineInProxy(downstream_q, restored, stop_switch=stop_switch)
         else:
-            starter = PipelineSink(restored)
+            starter = PipelineSink(restored, stop_switch=stop_switch)
         starter.start()
-    except Exception as e:
+    except KeyboardInterrupt:
+        print(f'Closing worker {identifier} due to keyboard interrupt')
         if downstream_q:
             downstream_q.put(StopIteration)
-        raise e
+        return
+    except:
+        if downstream_q:
+            downstream_q.put(StopIteration)
+        error_switch.value += 1
+        traceback.print_exception(*sys.exc_info(), file=sys.stderr)
 
 
 def serialize_to_file(pipe_def, outfile=None, pretty=True):

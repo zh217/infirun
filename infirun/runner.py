@@ -1,5 +1,7 @@
 import abc
 import copy
+import sys
+
 import tarjan
 
 from .wrapped import ensure_unwrapped_constant
@@ -12,7 +14,8 @@ class Runner(abc.ABC):
 
 class ProcessRunner(Runner):
 
-    def __init__(self, queue_size=1, n_process=1, process_type='thread'):
+    def __init__(self, queue_size=1, n_process=1, process_type='thread', idx=None):
+        self.idx = idx
         assert process_type in ['thread', 'pytorch', 'process']
         self.queue_size = ensure_unwrapped_constant(queue_size)
         assert self.queue_size >= 1
@@ -20,6 +23,8 @@ class ProcessRunner(Runner):
         assert self.n_process >= 1
         self.process_type = ensure_unwrapped_constant(process_type)
         self.started = False
+        self.stop_switches = []
+        self.error_switch = None
         self.processes = []
 
     def negotiate_queue_with_downstream(self, other):
@@ -36,29 +41,55 @@ class ProcessRunner(Runner):
             import multiprocessing.dummy
             return multiprocessing.dummy.Queue
 
-    def get_process_constructor(self):
+    def get_process_constructor_module(self):
         if self.process_type == 'pytorch':
             import torch.multiprocessing
-            return torch.multiprocessing.Process
+            return torch.multiprocessing
         elif self.process_type == 'process':
             import multiprocessing
-            return multiprocessing.Process
+            return multiprocessing
         else:
             import multiprocessing.dummy
-            return multiprocessing.dummy.Process
+            return multiprocessing.dummy
 
     def start(self, serialized, downsteam_q, upstream_qs):
         if self.started:
             raise RuntimeError('Runner already started')
 
+        mod = self.get_process_constructor_module()
+        self.error_switch = mod.Value('b', 0)
+
         for i in range(self.n_process):
-            Process = self.get_process_constructor()
-            p = Process(target=run_in_process, args=(serialized, downsteam_q, upstream_qs, i))
+            stop_switch = mod.Value('b', 0, lock=False)
+            p = mod.Process(target=run_in_process,
+                            args=(serialized, downsteam_q, upstream_qs, i, self.process_type != 'thread', stop_switch,
+                                  self.error_switch))
+            self.stop_switches.append(stop_switch)
             self.processes.append(p)
             p.daemon = True
             p.start()
 
         self.started = True
+
+    def join(self):
+        for p in self.processes:
+            p.join()
+
+    def terminate(self):
+        for v in self.stop_switches:
+            v.value = 1
+        for p in self.processes:
+            if p.is_alive():
+                try:
+                    p.join(timeout=1)
+                    p.terminate()
+                except:
+                    pass
+            elif p.exitcode != 0:
+                raise RuntimeError(f'Worker {self.idx} exited with non-zero status ${p.exitcode}')
+            elif self.error_switch.value:
+                raise RuntimeError(
+                    f'At least {self.error_switch.value} subprocesses of worker {self.idx} exited with exceptions')
 
 
 def pprint(serialized, level=0, prefix='root', outfile=None):
@@ -175,38 +206,58 @@ def _queue_to_gen(q):
         yield data
 
 
+def _ensure_unique_names(serialized, seen):
+    if serialized.get('type', None) not in ['fun_invoke', 'obj_invoke', 'comp_obj']:
+        return
+
+    if serialized['name'] in seen:
+        raise RuntimeError(f'Duplicate name in serialization: {serialized["name"]}')
+
+    seen.add(serialized['name'])
+
+    for a in serialized['args'] + list(serialized['kwargs'].values()):
+        _ensure_unique_names(a, seen)
+
+
 def run_with_runner(serialized, return_iter=False):
-    dep_maps, order = generate_dependency_map(serialized)
-    runner_map = {}
-    for k, v in dep_maps.items():
-        runner_def = v['runner']
-        args = [deserialize(a).raw for a in runner_def['args']]
-        kwargs = {k: deserialize(a).raw for k, a in runner_def['kwargs'].items()}
-        runner_map[k] = ProcessRunner(*args, **kwargs)
+    try:
+        _ensure_unique_names(serialized, set())
+        dep_maps, order = generate_dependency_map(serialized)
+        runner_map = {}
+        for k, v in dep_maps.items():
+            runner_def = v['runner']
+            args = [deserialize(a).raw for a in runner_def['args']]
+            kwargs = {k: deserialize(a).raw for k, a in runner_def['kwargs'].items()}
+            runner_map[k] = ProcessRunner(*args, idx=k, **kwargs)
 
-    downstream_queues = {}
+        downstream_queues = {}
 
-    for i, _, downstream_idx in order:
-        runner = runner_map[i]
-        downstream_runner = runner_map.get(downstream_idx, None)
-        Queue = runner.negotiate_queue_with_downstream(downstream_runner)
-        downstream_queues[i] = Queue and Queue(maxsize=runner.queue_size)
+        for i, _, downstream_idx in order:
+            runner = runner_map[i]
+            downstream_runner = runner_map.get(downstream_idx, None)
+            Queue = runner.negotiate_queue_with_downstream(downstream_runner)
+            downstream_queues[i] = Queue and Queue(maxsize=runner.queue_size)
 
-    root_runner = runner_map[0]
+        root_runner = runner_map[0]
 
-    if return_iter:
-        Queue = root_runner.negotiate_queue_with_downstream(root_runner)
-        downstream_queues[0] = Queue(maxsize=1)
+        if return_iter:
+            Queue = root_runner.negotiate_queue_with_downstream(root_runner)
+            downstream_queues[0] = Queue(maxsize=1)
 
-    for i, upstream_idxs, downstream_idx in order:
-        runner = runner_map[i]
-        serialized = dep_maps[i]
-        down_q = downstream_queues[i]
-        up_qs = {k: downstream_queues[k] for k in upstream_idxs}
-        runner.start(serialized, down_q, up_qs)
+        for i, upstream_idxs, downstream_idx in order:
+            runner = runner_map[i]
+            serialized = dep_maps[i]
+            down_q = downstream_queues[i]
+            up_qs = {k: downstream_queues[k] for k in upstream_idxs}
+            runner.start(serialized, down_q, up_qs)
 
-    if return_iter:
-        return _queue_to_gen(downstream_queues[0])
-    else:
-        for p in root_runner.processes:
-            p.join()
+        if return_iter:
+            return _queue_to_gen(downstream_queues[0])
+        else:
+            root_runner.join()
+            for i, _, _ in reversed(order):
+                runner_map[i].terminate()
+
+    except KeyboardInterrupt:
+        print('Exiting due to keyboard interrupt')
+        sys.exit(0)
