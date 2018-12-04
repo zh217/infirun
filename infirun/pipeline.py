@@ -1,7 +1,10 @@
+import base64
 import inspect
 import importlib
 import abc
 import json
+import sys
+import uuid
 
 from .wrapped import ensure_wrapped, Wrapped, ensure_constant, Constant
 
@@ -50,16 +53,57 @@ class Invocation(abc.ABC):
     def set_upstream_runner(self, runner_cls, *args, **kwargs):
         self._runner = RunnerWrapper(runner_cls, args, kwargs)
 
-    def __init__(self, runner=None, name=None):
-        self.name = name
+    def __init__(self, iter_output, n_epochs_left, args, kwargs, runner=None, name=None):
+        self.name = name or base64.urlsafe_b64encode(uuid.uuid4().bytes).decode('ascii').strip("=")
         if runner is None:
             self._runner = RunnerWrapper()
         else:
             self._runner = runner
+        self.iter_output = iter_output
+        self.iter_output_buffer = iter(())
+        self.n_epochs_left = n_epochs_left
+        self.args = [ensure_wrapped(a) for a in args]
+        self.kwargs = {k: ensure_wrapped(v) for k, v in kwargs.items()}
+        self.invoker = None
 
     def set_name(self, name):
         self.name = name
         return self
+
+    def __next__(self):
+        if self.iter_output:
+            try:
+                return next(self.iter_output_buffer)
+            except StopIteration:
+                if self.n_epochs_left == 0:
+                    raise
+
+                if self.n_epochs_left is not None:
+                    self.n_epochs_left -= 1
+
+                self.iter_output_buffer = iter(self._invoke_raw())
+                return next(self)
+        else:
+            return self._invoke_raw()
+
+    def __iter__(self):
+        return self
+
+    def _invoke_raw(self):
+        args = [next(a) for a in self.args]
+        kwargs = {k: next(a) for k, a in self.kwargs.items()}
+        try:
+            return self.invoker(*args, **kwargs)
+        except StopIteration:
+            raise
+        except Exception:
+            raise RuntimeError(
+                f'Invocation failed for {self.get_invoker_info()} <{self.name}> with: {args}, {kwargs}').with_traceback(
+                sys.exc_info()[2])
+
+    @abc.abstractmethod
+    def get_invoker_info(self):
+        pass
 
 
 class PipelineFunctionWrapper:
@@ -116,14 +160,8 @@ class PipelineFunctionInvocation(Wrapped, Invocation):
         }
 
     def __init__(self, fn_wrapper, args, kwargs, runner=None, name=None):
-        super().__init__(runner, name)
+        super().__init__(fn_wrapper.iter_output, fn_wrapper.n_epochs, args, kwargs, runner, name)
         self.fn_wrapper = fn_wrapper
-        self.args = [ensure_wrapped(a) for a in args]
-        self.kwargs = {k: ensure_wrapped(v) for k, v in kwargs.items()}
-        self.iter_output = fn_wrapper.iter_output
-        self.iter_output_buffer = iter(())
-        self.n_epochs_left = fn_wrapper.n_epochs
-        self.invoker = None
 
     def start(self):
         for a in self.args:
@@ -134,29 +172,8 @@ class PipelineFunctionInvocation(Wrapped, Invocation):
 
         self.invoker = self.fn_wrapper.raw
 
-    def __next__(self):
-        if self.iter_output:
-            try:
-                return next(self.iter_output_buffer)
-            except StopIteration:
-                if self.n_epochs_left == 0:
-                    raise
-
-                if self.n_epochs_left is not None:
-                    self.n_epochs_left -= 1
-
-                self.iter_output_buffer = iter(self._invoke_raw())
-                return next(self.iter_output_buffer)
-        else:
-            return self._invoke_raw()
-
-    def __iter__(self):
-        return self
-
-    def _invoke_raw(self):
-        args = (next(a) for a in self.args)
-        kwargs = {k: next(a) for k, a in self.kwargs.items()}
-        return self.invoker(*args, **kwargs)
+    def get_invoker_info(self):
+        return f'{self.fn_wrapper.raw.__module__}:{self.fn_wrapper.raw.__name__}'
 
 
 class PipelineClassWrapper:
@@ -258,40 +275,15 @@ class PipelineClassWrapperInstanceInvocation(Wrapped, Invocation):
         }
 
     def __init__(self, inst_wrapper, method, args, kwargs, runner=None, name=None):
-        super().__init__(runner, name)
+        super().__init__(inst_wrapper.cls_wrapper.iter_output,
+                         inst_wrapper.cls_wrapper.n_epochs,
+                         args,
+                         kwargs,
+                         runner,
+                         name)
         self.inst_wrapper = inst_wrapper
         self.method = method
-        self.args = [ensure_wrapped(a) for a in args]
-        self.kwargs = {k: ensure_wrapped(a) for k, a in kwargs.items()}
         self.inst = None
-        self.iter_output_buffer = iter(())
-        self.iter_output = inst_wrapper.cls_wrapper.iter_output
-        self.n_epochs_left = inst_wrapper.cls_wrapper.n_epochs
-        self.invoker = None
-
-    def __next__(self):
-        if self.iter_output:
-            try:
-                return next(self.iter_output_buffer)
-            except StopIteration:
-                if self.n_epochs_left == 0:
-                    raise StopIteration
-
-                if self.n_epochs_left is not None:
-                    self.n_epochs_left -= 1
-
-                self.iter_output_buffer = iter(self._invoke_raw())
-                return next(self.iter_output_buffer)
-        else:
-            return self._invoke_raw()
-
-    def __iter__(self):
-        return self
-
-    def _invoke_raw(self):
-        args = [next(a) for a in self.args]
-        kwargs = {k: next(a) for k, a in self.kwargs.items()}
-        return self.invoker(*args, **kwargs)
 
     def start(self):
         for a in self.args:
@@ -305,6 +297,9 @@ class PipelineClassWrapperInstanceInvocation(Wrapped, Invocation):
             self.invoker = self.inst
         else:
             self.invoker = getattr(self.inst, self.method)
+
+    def get_invoker_info(self):
+        return f'{self.inst_wrapper.cls_wrapper.raw.__module__}:{self.inst_wrapper.cls_wrapper.raw.__name__}.{self.method or "__call__"}'
 
 
 class SwitchCase(Wrapped):
@@ -456,6 +451,8 @@ class PipelineOutProxy(Wrapped):
         data = self.queue.get()
         if data == StopIteration:
             raise StopIteration
+        # if isinstance(data, Exception):
+        #     raise StopIteration
         return data
 
     def start(self):
@@ -501,9 +498,8 @@ class PipelineSink:
             for v in self.pipeline:
                 self.callback(v)
         else:
-            for el in self.pipeline:
+            for _ in self.pipeline:
                 pass
-                # print(el)
 
 
 def augment_serialized(serialized, upstream_qs):

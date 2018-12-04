@@ -111,6 +111,7 @@ def test_runner_example_2():
     mult1_res.set_upstream_runner(ProcessRunner, n_process=2, process_type='process')
     n_gen.set_upstream_runner(ProcessRunner)
     n_gen2.set_upstream_runner(ProcessRunner)
+    final.set_upstream_runner(ProcessRunner, process_type='process')
 
     # final.start()
     #
