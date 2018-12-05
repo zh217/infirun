@@ -1,4 +1,5 @@
 import pytest
+import pprint as pp
 
 from infirun.runner import *
 from ..pipeline import *
@@ -141,3 +142,77 @@ def test_runner_name_clash():
 
     with pytest.raises(Exception):
         run_with_runner(final.serialize())
+
+
+def test_params():
+    n_gen = number_gen().set_name('n_gen')
+    mult1 = Multiplier(2).set_name('mult1_cls')
+    mult1_res = mult1(n_gen).set_name('mult1')
+    mult2 = Multiplier(3).set_name('mult2_cls')
+    mult2_res = mult2(mult1_res).set_name('mult2')
+    mult3 = Multiplier(factor=5).set_name('mult3_cls')
+    mult3_res = mult3(mult2_res).set_name('mult3')
+    n_gen2 = number_gen().set_name('n_gen2')
+    mult4 = Multiplier(10).set_name('mult4_cls')
+    mult4_res = mult4(n_gen2).set_name('mult4_res')
+    penultimate = multiply(m=mult3_res, n=mult4_res).set_name('penultimate')
+    branch = multiply(2, n=5).set_name('branch')
+    final = combiner(penultimate, branch).set_name('final')
+    serialized = final.serialize()
+    params = get_const_params(serialized)
+
+    assert params['mult1_cls'][0] == 2
+    assert params['mult2_cls'][0] == 3
+    assert params['mult3_cls']['factor'] == 5
+    assert params['mult4_cls'][0] == 10
+    assert 'penultimate' not in params
+    assert params['branch'] == {0: 2, 'n': 5}
+
+    params['branch'] = {0: 4, 'n': 8}
+    params['mult1_cls'][0] = 20
+
+    new_serialized = override_const_params(serialized, params)
+    new_params = get_const_params(new_serialized)
+
+    assert new_params['mult1_cls'][0] == 20
+    assert new_params['mult2_cls'][0] == 3
+    assert new_params['mult3_cls']['factor'] == 5
+    assert new_params['mult4_cls'][0] == 10
+    assert 'penultimate' not in new_params
+    assert new_params['branch'] == {0: 4, 'n': 8}
+
+
+@pipeline
+class StatefulCounter(PersistentState):
+    def __init__(self, init_count=0, will_count=10):
+        super().__init__()
+        self.count = init_count
+        self.remaining = will_count
+
+    def __call__(self):
+        if self.remaining == 0:
+            raise StopIteration
+        self.count += 1
+        self.remaining -= 1
+        self.persist_state('init_count', self.count)
+        return self.count
+
+
+def test_persistent_state():
+    stateful1 = StatefulCounter(init_count=0).set_name('stateful1')
+    stateful2 = StatefulCounter(init_count=0).set_name('stateful2')
+    invoke1 = stateful1().set_name('invoke1')
+    invoke2 = stateful2().set_name('invoke2')
+    combined = combiner(invoke1, invoke2).set_name('combined')
+
+    invoke1.set_upstream_runner(ProcessRunner)
+    invoke2.set_upstream_runner(ProcessRunner, process_type='process')
+    combined.set_upstream_runner(ProcessRunner)
+
+    result = run_with_runner(combined.serialize())
+    assert result == {'stateful1': {'init_count': 10},
+                      'stateful2': {'init_count': 10}}
+
+    result = run_with_runner(override_const_params(combined.serialize(), result))
+    assert result == {'stateful1': {'init_count': 20},
+                      'stateful2': {'init_count': 20}}

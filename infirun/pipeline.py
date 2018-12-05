@@ -223,20 +223,26 @@ class PipelineClassWrapperInstance:
         cls = PipelineClassWrapper.deserialize(serialized['cls'])
         args = [deserialize(a) for a in serialized['args']]
         kwargs = {k: deserialize(a) for k, a in serialized['kwargs'].items()}
-        return PipelineClassWrapperInstance(cls, args, kwargs)
+        return PipelineClassWrapperInstance(cls, args, kwargs, name=serialized['name'])
 
     def serialize(self):
         return {
             'type': 'obj',
             'cls': self.cls_wrapper.serialize(),
             'args': [a.serialize() for a in self.args],
-            'kwargs': {k: a.serialize() for k, a in self.kwargs.items()}
+            'kwargs': {k: a.serialize() for k, a in self.kwargs.items()},
+            'name': self.name
         }
 
-    def __init__(self, cls_wrapper, args, kwargs):
+    def __init__(self, cls_wrapper, args, kwargs, name=None):
+        self.name = _ensure_name(name)
         self.cls_wrapper = cls_wrapper
         self.args = [ensure_component_argument(a) for a in args]
         self.kwargs = {k: ensure_component_argument(a) for k, a in kwargs.items()}
+
+    def set_name(self, name):
+        self.name = name
+        return self
 
     def __call__(self, *args, **kwargs):
         return PipelineClassWrapperInstanceInvocation(self, None, args, kwargs)
@@ -258,7 +264,11 @@ class PipelineClassWrapperInstance:
 
         args = [a.raw for a in self.args]
         kwargs = {k: a.raw for k, a in self.kwargs.items()}
-        return self.cls_wrapper.raw(*args, **kwargs)
+        inst = self.cls_wrapper.raw(*args, **kwargs)
+        if isinstance(inst, PersistentState):
+            manager = state_manager_factory(self)
+            inst.set_state_manager(manager)
+        return inst
 
 
 class PipelineClassWrapperInstanceInvocation(Wrapped, Invocation):
@@ -545,25 +555,111 @@ def augment_serialized(serialized, upstream_qs, stop_switch):
         serialized['stop_switch'] = stop_switch
 
 
-def run_in_process(serialized, downstream_q, upstream_qs, identifier, is_process, stop_switch, error_switch):
-    try:
-        augment_serialized(serialized, upstream_qs, stop_switch)
-        restored = deserialize(serialized)
-        if downstream_q:
-            starter = PipelineInProxy(downstream_q, restored, stop_switch=stop_switch)
-        else:
-            starter = PipelineSink(restored, stop_switch=stop_switch)
-        starter.start()
-    except KeyboardInterrupt:
-        print(f'Closing worker {identifier} due to keyboard interrupt')
-        if downstream_q:
-            downstream_q.put(StopIteration)
-        return
-    except:
-        if downstream_q:
-            downstream_q.put(StopIteration)
-        error_switch.value += 1
-        traceback.print_exception(*sys.exc_info(), file=sys.stderr)
+class PersistentState(abc.ABC):
+    def __init__(self):
+        self.state_manager = None
+
+    def set_state_manager(self, manager):
+        self.state_manager = manager
+
+    def persist_state(self, key, value):
+        self.state_manager.persist_state(key, value)
+
+
+class StateManager:
+
+    def __init__(self, managed):
+        self.managed_obj = managed
+        self.allowed_keys = self._get_allowed_keys()
+
+    def _get_allowed_keys(self):
+        ret = set()
+        for k, v in self.managed_obj.kwargs.items():
+            if isinstance(v, Constant):
+                ret.add(k)
+        return ret
+
+    def check_key(self, key):
+        if key not in self.allowed_keys:
+            raise KeyError(f'State change not allowed for key: {key}')
+
+    def persist_state(self, key, value):
+        self.check_key(key)
+        print(f'Requested state change: {key} -> {value}')
+
+
+class SubprocessStateManager(StateManager):
+    def __init__(self, managed, state_dict_proxy):
+        super().__init__(managed)
+        self.state_dict_proxy = state_dict_proxy
+
+    def persist_state(self, key, value):
+        self.check_key(key)
+        self.state_dict_proxy.update_state(name=self.managed_obj.name,
+                                           key=key,
+                                           value=value)
+
+
+def default_state_manager_factory(inst):
+    return StateManager(inst)
+
+
+state_manager_factory = default_state_manager_factory
+
+
+class StateDictProxy:
+    def __init__(self, state_dict, callback=None):
+        self.state_dict = state_dict
+        self.callback = callback
+
+    def update_state(self, name, key, value):
+        self.state_dict[name][key] = value
+        if self.callback:
+            self.callback(self.state_dict)
+
+    def current_state(self):
+        return self.state_dict
+
+
+class StateManagerContext:
+    def __init__(self, new_factory):
+        self.old_factory = None
+        self.new_factory = new_factory
+
+    def __enter__(self):
+        global state_manager_factory
+        self.old_factory = state_manager_factory
+        state_manager_factory = self.new_factory
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        global state_manager_factory
+        state_manager_factory = self.old_factory
+
+
+def run_in_process(serialized, downstream_q, upstream_qs, identifier,
+                   is_process, stop_switch, error_switch, state_dict_proxy=None):
+    def state_factory(inst):
+        return SubprocessStateManager(inst, state_dict_proxy)
+
+    with StateManagerContext(state_factory):
+        try:
+            augment_serialized(serialized, upstream_qs, stop_switch)
+            restored = deserialize(serialized)
+            if downstream_q:
+                starter = PipelineInProxy(downstream_q, restored, stop_switch=stop_switch)
+            else:
+                starter = PipelineSink(restored, stop_switch=stop_switch)
+            starter.start()
+        except KeyboardInterrupt:
+            print(f'Closing worker {identifier} due to keyboard interrupt')
+            if downstream_q:
+                downstream_q.put(StopIteration)
+            return
+        except:
+            if downstream_q:
+                downstream_q.put(StopIteration)
+            error_switch.value += 1
+            traceback.print_exception(*sys.exc_info(), file=sys.stderr)
 
 
 def serialize_to_file(pipe_def, outfile=None, pretty=True):
@@ -575,12 +671,3 @@ def serialize_to_file(pipe_def, outfile=None, pretty=True):
 
     with open(outfile, 'w', encoding='utf-8') as f:
         json.dump(serialized, f, ensure_ascii=False, indent=2 if pretty else None)
-
-
-class PersistentState(abc.ABC):
-    def persist_state(self):
-        pass
-
-    @abc.abstractmethod
-    def finalize(self):
-        pass

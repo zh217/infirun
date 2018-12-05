@@ -1,11 +1,12 @@
 import abc
 import copy
+import multiprocessing.managers
 import sys
 
 import tarjan
 
 from .wrapped import ensure_unwrapped_constant
-from .pipeline import RunnerWrapper, run_in_process, deserialize
+from .pipeline import RunnerWrapper, run_in_process, deserialize, StateDictProxy
 
 
 class Runner(abc.ABC):
@@ -14,7 +15,8 @@ class Runner(abc.ABC):
 
 class ProcessRunner(Runner):
 
-    def __init__(self, queue_size=1, n_process=1, process_type='thread', idx=None):
+    def __init__(self, queue_size=1, n_process=1, process_type='thread', state_dict_proxy=None, idx=None):
+        self.state_dict_proxy = state_dict_proxy
         self.idx = idx
         assert process_type in ['thread', 'pytorch', 'process']
         self.queue_size = ensure_unwrapped_constant(queue_size)
@@ -63,7 +65,7 @@ class ProcessRunner(Runner):
             stop_switch = mod.Value('b', 0, lock=False)
             p = mod.Process(target=run_in_process,
                             args=(serialized, downsteam_q, upstream_qs, i, self.process_type != 'thread', stop_switch,
-                                  self.error_switch))
+                                  self.error_switch, self.state_dict_proxy))
             self.stop_switches.append(stop_switch)
             self.processes.append(p)
             p.daemon = True
@@ -207,7 +209,7 @@ def _queue_to_gen(q):
 
 
 def _ensure_unique_names(serialized, seen):
-    if serialized.get('type', None) not in ['fun_invoke', 'obj_invoke', 'comp_obj']:
+    if serialized.get('type', None) not in ['fun_invoke', 'obj_invoke', 'comp_obj', 'obj']:
         return
 
     if serialized['name'] in seen:
@@ -218,17 +220,35 @@ def _ensure_unique_names(serialized, seen):
     for a in serialized['args'] + list(serialized['kwargs'].values()):
         _ensure_unique_names(a, seen)
 
+    inst = serialized.get('inst')
 
-def run_with_runner(serialized, return_iter=False):
+    if inst:
+        _ensure_unique_names(inst, seen)
+
+
+class StateManager(multiprocessing.managers.BaseManager):
+    pass
+
+
+StateManager.register('StateDictProxy', StateDictProxy)
+
+
+def run_with_runner(serialized, return_iter=False, state_change_callback=None):
     try:
-        _ensure_unique_names(serialized, set())
+
+        state_manager = StateManager()
+        state_manager.start()
+
+        state_dict = get_const_params(serialized)
+        state_dict_proxy = state_manager.StateDictProxy(state_dict, state_change_callback)
+
         dep_maps, order = generate_dependency_map(serialized)
         runner_map = {}
         for k, v in dep_maps.items():
             runner_def = v['runner']
             args = [deserialize(a).raw for a in runner_def['args']]
             kwargs = {k: deserialize(a).raw for k, a in runner_def['kwargs'].items()}
-            runner_map[k] = ProcessRunner(*args, idx=k, **kwargs)
+            runner_map[k] = ProcessRunner(*args, idx=k, state_dict_proxy=state_dict_proxy, **kwargs)
 
         downstream_queues = {}
 
@@ -258,6 +278,49 @@ def run_with_runner(serialized, return_iter=False):
             for i, _, _ in reversed(order):
                 runner_map[i].terminate()
 
+        return state_dict_proxy.current_state()
     except KeyboardInterrupt:
         print('Exiting due to keyboard interrupt')
         sys.exit(0)
+
+
+def get_const_params(serialized, collected=None):
+    if collected is None:
+        _ensure_unique_names(serialized, set())
+        collected = {}
+
+    if serialized.get('type', None) in ['fun_invoke', 'obj_invoke', 'comp_obj', 'obj']:
+
+        for k, a in list(enumerate(serialized['args'])) + list(serialized['kwargs'].items()):
+            if a.get('type', None) == 'const':
+                arg_map = collected.setdefault(serialized['name'], {})
+                arg_map[k] = a['value']
+            else:
+                get_const_params(a, collected)
+
+    inst = serialized.get('inst', None)
+    if inst:
+        get_const_params(inst, collected)
+
+    return collected
+
+
+def _override_const_params(serialized, params_dict):
+    if serialized.get('type', None) in ['fun_invoke', 'obj_invoke', 'comp_obj', 'obj']:
+
+        for k, a in list(enumerate(serialized['args'])) + list(serialized['kwargs'].items()):
+            if a.get('type', None) == 'const':
+                if serialized['name'] in params_dict and k in params_dict[serialized['name']]:
+                    a['value'] = params_dict[serialized['name']][k]
+            else:
+                _override_const_params(a, params_dict)
+
+    inst = serialized.get('inst', None)
+    if inst:
+        _override_const_params(inst, params_dict)
+
+
+def override_const_params(serialized, params_dict):
+    serialized = copy.deepcopy(serialized)
+    _override_const_params(serialized, params_dict)
+    return serialized
