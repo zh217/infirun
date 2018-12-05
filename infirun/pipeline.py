@@ -8,6 +8,7 @@ import sys
 import traceback
 import uuid
 
+from infirun.signal import GracefulExit, setup_signal_handlers
 from .wrapped import ensure_wrapped, Wrapped, ensure_constant, Constant
 
 QUEUE_WAIT_TIMEOUT = 0.1
@@ -638,6 +639,9 @@ class StateManagerContext:
 
 def run_in_process(serialized, downstream_q, upstream_qs, identifier,
                    is_process, stop_switch, error_switch, state_dict_proxy=None):
+    if is_process:
+        setup_signal_handlers()
+
     def state_factory(inst):
         return SubprocessStateManager(inst, state_dict_proxy)
 
@@ -650,8 +654,8 @@ def run_in_process(serialized, downstream_q, upstream_qs, identifier,
             else:
                 starter = PipelineSink(restored, stop_switch=stop_switch)
             starter.start()
-        except KeyboardInterrupt:
-            print(f'Closing worker {identifier} due to keyboard interrupt')
+        except GracefulExit:
+            print(f'Closing worker {identifier} due to interrupt')
             if downstream_q:
                 downstream_q.put(StopIteration)
             return

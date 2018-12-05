@@ -5,6 +5,7 @@ import sys
 
 import tarjan
 
+from infirun.signal import GracefulExit, setup_signal_handlers
 from .wrapped import ensure_unwrapped_constant
 from .pipeline import RunnerWrapper, run_in_process, deserialize, StateDictProxy
 
@@ -81,7 +82,7 @@ class ProcessRunner(Runner):
         for v in self.stop_switches:
             v.value = 1
         for p in self.processes:
-            if p.is_alive():
+            if p.is_alive() and self.process_type != 'thread':
                 try:
                     p.join(timeout=1)
                     p.terminate()
@@ -234,36 +235,37 @@ StateManager.register('StateDictProxy', StateDictProxy)
 
 
 def run_with_runner(serialized, return_iter=False, state_change_callback=None):
+    setup_signal_handlers()
+
+    state_manager = StateManager()
+    state_manager.start()
+
+    state_dict = get_const_params(serialized)
+    state_dict_proxy = state_manager.StateDictProxy(state_dict, state_change_callback)
+
+    dep_maps, order = generate_dependency_map(serialized)
+    runner_map = {}
+    for k, v in dep_maps.items():
+        runner_def = v['runner']
+        args = [deserialize(a).raw for a in runner_def['args']]
+        kwargs = {k: deserialize(a).raw for k, a in runner_def['kwargs'].items()}
+        runner_map[k] = ProcessRunner(*args, idx=k, state_dict_proxy=state_dict_proxy, **kwargs)
+
+    downstream_queues = {}
+
+    for i, _, downstream_idx in order:
+        runner = runner_map[i]
+        downstream_runner = runner_map.get(downstream_idx, None)
+        Queue = runner.negotiate_queue_with_downstream(downstream_runner)
+        downstream_queues[i] = Queue and Queue(maxsize=runner.queue_size)
+
+    root_runner = runner_map[0]
+
+    if return_iter:
+        Queue = root_runner.negotiate_queue_with_downstream(root_runner)
+        downstream_queues[0] = Queue(maxsize=1)
+
     try:
-
-        state_manager = StateManager()
-        state_manager.start()
-
-        state_dict = get_const_params(serialized)
-        state_dict_proxy = state_manager.StateDictProxy(state_dict, state_change_callback)
-
-        dep_maps, order = generate_dependency_map(serialized)
-        runner_map = {}
-        for k, v in dep_maps.items():
-            runner_def = v['runner']
-            args = [deserialize(a).raw for a in runner_def['args']]
-            kwargs = {k: deserialize(a).raw for k, a in runner_def['kwargs'].items()}
-            runner_map[k] = ProcessRunner(*args, idx=k, state_dict_proxy=state_dict_proxy, **kwargs)
-
-        downstream_queues = {}
-
-        for i, _, downstream_idx in order:
-            runner = runner_map[i]
-            downstream_runner = runner_map.get(downstream_idx, None)
-            Queue = runner.negotiate_queue_with_downstream(downstream_runner)
-            downstream_queues[i] = Queue and Queue(maxsize=runner.queue_size)
-
-        root_runner = runner_map[0]
-
-        if return_iter:
-            Queue = root_runner.negotiate_queue_with_downstream(root_runner)
-            downstream_queues[0] = Queue(maxsize=1)
-
         for i, upstream_idxs, downstream_idx in order:
             runner = runner_map[i]
             serialized = dep_maps[i]
@@ -279,8 +281,13 @@ def run_with_runner(serialized, return_iter=False, state_change_callback=None):
                 runner_map[i].terminate()
 
         return state_dict_proxy.current_state()
-    except KeyboardInterrupt:
-        print('Exiting due to keyboard interrupt')
+    except GracefulExit:
+        print('Exiting due to interrupt')
+        for i, _, _ in reversed(order):
+            try:
+                runner_map[i].terminate()
+            except:
+                pass
         sys.exit(0)
 
 

@@ -4,6 +4,7 @@ import sys
 import json
 
 from infirun.runner import run_with_runner
+from infirun.signal import GracefulExit
 
 
 def run_serialized(module, name, output_iter=False):
@@ -26,7 +27,7 @@ def main():
 
         for el in it:
             print(el)
-    except KeyboardInterrupt:
+    except GracefulExit:
         sys.exit(0)
 
 
