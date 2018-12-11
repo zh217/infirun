@@ -12,7 +12,7 @@ class Constant(Wrapped):
         return Constant(serialized['value'])
 
     def __init__(self, const):
-        assert json.loads(json.dumps(const)) == const, 'Constant value must be JSON-serializable'
+        assert json.loads(json.dumps(const, allow_nan=False)) == const, 'Constant value must be JSON-serializable'
         self.const = const
 
     def __next__(self):

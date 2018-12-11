@@ -670,8 +670,8 @@ def serialize_to_file(pipe_def, outfile=None, pretty=True):
     serialized = pipe_def.serialize()
 
     if outfile is None:
-        print(json.dumps(serialized, ensure_ascii=False, indent=2 if pretty else None))
+        print(json.dumps(serialized, ensure_ascii=False, indent=2 if pretty else None, allow_nan=False))
         return
 
     with open(outfile, 'w', encoding='utf-8') as f:
-        json.dump(serialized, f, ensure_ascii=False, indent=2 if pretty else None)
+        json.dump(serialized, f, ensure_ascii=False, indent=2 if pretty else None, allow_nan=False)
