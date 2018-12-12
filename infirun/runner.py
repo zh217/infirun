@@ -317,8 +317,11 @@ def _override_const_params(serialized, params_dict):
 
         for k, a in list(enumerate(serialized['args'])) + list(serialized['kwargs'].items()):
             if a.get('type', None) == 'const':
-                if serialized['name'] in params_dict and k in params_dict[serialized['name']]:
-                    a['value'] = params_dict[serialized['name']][k]
+                if serialized['name'] in params_dict:
+                    if k in params_dict[serialized['name']]:
+                        a['value'] = params_dict[serialized['name']][k]
+                    if str(k) in params_dict[serialized['name']]:
+                        a['value'] = params_dict[serialized['name']][str(k)]
             else:
                 _override_const_params(a, params_dict)
 
